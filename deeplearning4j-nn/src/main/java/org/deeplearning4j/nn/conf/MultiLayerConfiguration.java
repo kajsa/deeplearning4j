@@ -20,10 +20,7 @@
 
 package org.deeplearning4j.nn.conf;
 
-import lombok.AccessLevel;
-import lombok.AllArgsConstructor;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.*;
 import lombok.extern.slf4j.Slf4j;
 import org.deeplearning4j.nn.conf.inputs.InputType;
 import org.deeplearning4j.nn.conf.layers.*;
@@ -46,7 +43,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Configuration for a multi layer network
@@ -67,6 +63,14 @@ public class MultiLayerConfiguration implements Serializable, Cloneable {
     protected int tbpttFwdLength = 20;
     protected int tbpttBackLength = 20;
 
+    @Getter
+    @Setter
+    protected WorkspaceMode trainingWorkspaceMode;
+
+    @Getter
+    @Setter
+    protected WorkspaceMode inferenceWorkspaceMode;
+
     //Counter for the number of parameter updates so far
     // This is important for learning rate schedules, for example, and is stored here to ensure it is persisted
     // for Spark and model serialization
@@ -78,10 +82,12 @@ public class MultiLayerConfiguration implements Serializable, Cloneable {
      */
     public String toYaml() {
         ObjectMapper mapper = NeuralNetConfiguration.mapperYaml();
-        try {
-            return mapper.writeValueAsString(this);
-        } catch (org.nd4j.shade.jackson.core.JsonProcessingException e) {
-            throw new RuntimeException(e);
+        synchronized (mapper) {
+            try {
+                return mapper.writeValueAsString(this);
+            } catch (org.nd4j.shade.jackson.core.JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
@@ -107,10 +113,14 @@ public class MultiLayerConfiguration implements Serializable, Cloneable {
      */
     public String toJson() {
         ObjectMapper mapper = NeuralNetConfiguration.mapper();
-        try {
-            return mapper.writeValueAsString(this);
-        } catch (org.nd4j.shade.jackson.core.JsonProcessingException e) {
-            throw new RuntimeException(e);
+        synchronized (mapper) {
+            //JSON mappers are supposed to be thread safe: however, in practice they seem to miss fields occasionally
+            //when writeValueAsString is used by multiple threads. This results in invalid JSON. See issue #3243
+            try {
+                return mapper.writeValueAsString(this);
+            } catch (org.nd4j.shade.jackson.core.JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
@@ -279,6 +289,9 @@ public class MultiLayerConfiguration implements Serializable, Cloneable {
                 clone.inputPreProcessors = map;
             }
 
+            clone.inferenceWorkspaceMode = this.inferenceWorkspaceMode;
+            clone.trainingWorkspaceMode = this.trainingWorkspaceMode;
+
             return clone;
 
         } catch (CloneNotSupportedException e) {
@@ -305,6 +318,9 @@ public class MultiLayerConfiguration implements Serializable, Cloneable {
         @Deprecated
         protected int[] cnnInputSize;
 
+        protected WorkspaceMode trainingWorkspaceMode = WorkspaceMode.NONE;
+        protected WorkspaceMode inferenceWorkspaceMode = WorkspaceMode.SINGLE;
+
         /**
          * Specify the processors.
          * These are used at each layer for doing things like normalization and
@@ -329,6 +345,34 @@ public class MultiLayerConfiguration implements Serializable, Cloneable {
          */
         public Builder backprop(boolean backprop) {
             this.backprop = backprop;
+            return this;
+        }
+
+        /**
+         * This method defines Workspace mode being used during training:
+         * NONE: workspace won't be used
+         * SINGLE: one workspace will be used during whole iteration loop
+         * SEPARATE: separate workspaces will be used for feedforward and backprop iteration loops
+         *
+         * @param workspaceMode
+         * @return
+         */
+        public Builder trainingWorkspaceMode(@NonNull WorkspaceMode workspaceMode) {
+            this.trainingWorkspaceMode = workspaceMode;
+            return this;
+        }
+
+        /**
+         * This method defines Workspace mode being used during inference:
+         * NONE: workspace won't be used
+         * SINGLE: one workspace will be used during whole iteration loop
+         * SEPARATE: separate workspaces will be used for feedforward and backprop iteration loops
+         *
+         * @param workspaceMode
+         * @return
+         */
+        public Builder inferenceWorkspaceMode(@NonNull WorkspaceMode workspaceMode) {
+            this.inferenceWorkspaceMode = workspaceMode;
             return this;
         }
 
@@ -493,6 +537,8 @@ public class MultiLayerConfiguration implements Serializable, Cloneable {
             conf.backpropType = backpropType;
             conf.tbpttFwdLength = tbpttFwdLength;
             conf.tbpttBackLength = tbpttBackLength;
+            conf.trainingWorkspaceMode = trainingWorkspaceMode;
+            conf.inferenceWorkspaceMode = inferenceWorkspaceMode;
             Nd4j.getRandom().setSeed(conf.getConf(0).getSeed());
             return conf;
 

@@ -11,6 +11,7 @@ import org.deeplearning4j.nn.api.Model;
 import org.deeplearning4j.nn.api.Updater;
 import org.deeplearning4j.nn.conf.ComputationGraphConfiguration;
 import org.deeplearning4j.nn.conf.MultiLayerConfiguration;
+import org.deeplearning4j.nn.conf.WorkspaceMode;
 import org.deeplearning4j.nn.graph.ComputationGraph;
 import org.deeplearning4j.nn.multilayer.MultiLayerNetwork;
 import org.deeplearning4j.nn.updater.graph.ComputationGraphUpdater;
@@ -29,6 +30,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.LockSupport;
 
 /**
@@ -56,21 +58,43 @@ public class DefaultTrainer extends Thread implements Trainer {
     protected final String uuid = UUID.randomUUID().toString();
     protected boolean onRootModel = false;
     protected ParallelWrapper parallelWrapper;
+    protected WorkspaceMode workspaceMode;
+    protected AtomicLong lastEtlTime = new AtomicLong(0);
+
+    protected AtomicBoolean nullMode = new AtomicBoolean(false);
+    protected DataSet nullDataSet;
 
 
 
     @Override
-    public void feedMultiDataSet(@NonNull MultiDataSet dataSet) {
+    public void feedMultiDataSet(@NonNull MultiDataSet dataSet, long etlTime) {
         setupIfNeccessary();
         running.incrementAndGet();
         queueMDS.add(dataSet);
+
+        if (lastEtlTime == null)
+            lastEtlTime = new AtomicLong(0);
+
+        lastEtlTime.set(etlTime);
     }
 
     @Override
-    public void feedDataSet(@NonNull DataSet dataSet) {
+    public void feedDataSet(DataSet dataSet, long etlTime) {
         setupIfNeccessary();
         running.incrementAndGet();
-        queue.add(dataSet);
+        if (dataSet != null)
+            queue.add(dataSet);
+        else {
+            if (nullMode == null)
+                nullMode = new AtomicBoolean(false);
+
+            nullMode.set(true);
+        }
+
+        if (lastEtlTime == null)
+            lastEtlTime = new AtomicLong(0);
+
+        lastEtlTime.set(etlTime);
     }
 
     @Override
@@ -96,8 +120,7 @@ public class DefaultTrainer extends Thread implements Trainer {
 
                 updater.setStateViewArray((MultiLayerNetwork) replicatedModel, viewD, false);
             }
-        }
-        else if (replicatedModel instanceof ComputationGraph) {
+        } else if (replicatedModel instanceof ComputationGraph) {
             replicatedModel.setParams(model.params().dup());
 
             ComputationGraphUpdater updater = ((ComputationGraph) model).getUpdater();
@@ -120,17 +143,16 @@ public class DefaultTrainer extends Thread implements Trainer {
 
 
 
-
     protected void setupIfNeccessary() {
-        if(queue == null)
+        if (queue == null)
             queue = new LinkedBlockingQueue<>();
-        if(queueMDS == null)
+        if (queueMDS == null)
             queueMDS = new LinkedBlockingQueue<>();
-        if(running == null)
+        if (running == null)
             running = new AtomicInteger(0);
-        if(shouldStop == null)
+        if (shouldStop == null)
             shouldStop = new AtomicBoolean(false);
-        if(shouldUpdate == null)
+        if (shouldUpdate == null)
             shouldUpdate = new AtomicBoolean(false);
     }
 
@@ -151,22 +173,39 @@ public class DefaultTrainer extends Thread implements Trainer {
     @Override
     public void run() {
         setupIfNeccessary();
-        
+
         try {
             // we create fresh network, with the same configuration, as initially created by user
             // however, we don't need clone or anything here
             if (originalModel instanceof MultiLayerNetwork) {
                 if (!onRootModel) {
-                    MultiLayerConfiguration conf = MultiLayerConfiguration.fromJson(((MultiLayerNetwork) originalModel).getLayerWiseConfigurations().toJson());
-
+                    MultiLayerConfiguration conf = MultiLayerConfiguration.fromJson(
+                                    ((MultiLayerNetwork) originalModel).getLayerWiseConfigurations().toJson());
+                    conf.setTrainingWorkspaceMode(workspaceMode);
                     this.replicatedModel = new MultiLayerNetwork(conf);
 
                     replicatedModel.init();
+
+                    // we replicate original model params & updater state, just in case it's pre-trained model
+                    synchronized (originalModel) {
+                        replicatedModel.setParams(originalModel.params());
+
+                        Updater updaterReplica = ((MultiLayerNetwork) replicatedModel).getUpdater();
+                        Updater updaterOrigina = ((MultiLayerNetwork) originalModel).getUpdater();
+
+                        if (updaterOrigina != null && updaterOrigina.getStateViewArray() != null)
+                            updaterReplica.setStateViewArray((MultiLayerNetwork) replicatedModel,
+                                            updaterOrigina.getStateViewArray().dup(), false);
+
+                        if (Nd4j.getExecutioner() instanceof GridExecutioner)
+                            ((GridExecutioner) Nd4j.getExecutioner()).flushQueueBlocking();
+                    }
+
                     Collection<IterationListener> oldListeners = ((MultiLayerNetwork) originalModel).getListeners();
                     oldListeners = (oldListeners == null ? new ArrayList<>() : new ArrayList<>(oldListeners));
                     Collection<IterationListener> replicatedListeners = new ArrayList<>();
 
-                    if(parallelWrapper.getListeners() != null) {
+                    if (parallelWrapper.getListeners() != null) {
                         oldListeners.addAll(parallelWrapper.getListeners());
                     }
 
@@ -174,18 +213,34 @@ public class DefaultTrainer extends Thread implements Trainer {
 
                     this.replicatedModel.setListeners(replicatedListeners);
                 }
-            }
-            else if (originalModel instanceof ComputationGraph) {
+            } else if (originalModel instanceof ComputationGraph) {
                 if (!onRootModel) {
-                    this.replicatedModel = new ComputationGraph(ComputationGraphConfiguration.fromJson(((ComputationGraph) originalModel).getConfiguration().toJson()));
+                    ComputationGraphConfiguration conf = ComputationGraphConfiguration
+                                    .fromJson(((ComputationGraph) originalModel).getConfiguration().toJson());
+                    conf.setTrainingWorkspaceMode(workspaceMode);
 
-
+                    this.replicatedModel = new ComputationGraph(conf);
                     this.replicatedModel.init();
+
+                    // we replicate original model params & updater state, just in case it's pre-trained model
+                    synchronized (originalModel) {
+                        replicatedModel.setParams(originalModel.params());
+
+                        ComputationGraphUpdater updaterReplica = ((ComputationGraph) replicatedModel).getUpdater();
+                        ComputationGraphUpdater updaterOrigina = ((ComputationGraph) originalModel).getUpdater();
+
+                        if (updaterOrigina != null && updaterOrigina.getStateViewArray() != null)
+                            updaterReplica.setStateViewArray(updaterOrigina.getStateViewArray().dup());
+
+                        if (Nd4j.getExecutioner() instanceof GridExecutioner)
+                            ((GridExecutioner) Nd4j.getExecutioner()).flushQueueBlocking();
+                    }
+
                     Collection<IterationListener> oldListeners = ((ComputationGraph) originalModel).getListeners();
                     oldListeners = (oldListeners == null ? new ArrayList<>() : new ArrayList<>(oldListeners));
                     Collection<IterationListener> replicatedListeners = new ArrayList<>();
 
-                    if(parallelWrapper.getListeners() != null) {
+                    if (parallelWrapper.getListeners() != null) {
                         oldListeners.addAll(parallelWrapper.getListeners());
                     }
                     configureListeners(uuid, oldListeners, replicatedListeners);
@@ -196,15 +251,25 @@ public class DefaultTrainer extends Thread implements Trainer {
 
             if (!useMDS) {
                 while (!shouldStop.get()) {
-                    DataSet dataSet = queue.poll(100, TimeUnit.MILLISECONDS);
+                    DataSet dataSet = null;
+                    if (nullMode == null || !nullMode.get())
+                        dataSet = queue.poll(100, TimeUnit.MILLISECONDS);
+                    else {
+                        if (nullDataSet == null)
+                            nullDataSet = new org.nd4j.linalg.dataset.DataSet(Nd4j.create(32, 3, 224, 224), Nd4j.create(32, 200));
+
+                        dataSet = nullDataSet;
+                    }
                     if (dataSet != null) {
 
                         //if (Nd4j.getAffinityManager().getDeviceForCurrentThread() != Nd4j.getAffinityManager().getDeviceForArray(dataSet.getFeatures()))
                         //    log.debug("Thread: {}; Bad align for data: {}/{}", Thread.currentThread().getId(), Nd4j.getAffinityManager().getDeviceForCurrentThread(), Nd4j.getAffinityManager().getDeviceForArray(dataSet.getFeatures()));
 
                         if (replicatedModel instanceof MultiLayerNetwork) {
+                            ((MultiLayerNetwork) replicatedModel).setLastEtlTime(lastEtlTime.get());
                             ((MultiLayerNetwork) replicatedModel).fit(dataSet);
                         } else if (replicatedModel instanceof ComputationGraph) {
+                            ((ComputationGraph) replicatedModel).setLastEtlTime(lastEtlTime.get());
                             ((ComputationGraph) replicatedModel).fit(dataSet);
                         }
 
@@ -214,13 +279,13 @@ public class DefaultTrainer extends Thread implements Trainer {
                         running.decrementAndGet();
                     }
                 }
-            }
-            else {
+            } else {
                 // loop for MultiDataSet
                 while (!shouldStop.get()) {
                     MultiDataSet dataSet = queueMDS.poll(100, TimeUnit.MILLISECONDS);
                     if (dataSet != null) {
                         if (replicatedModel instanceof ComputationGraph) {
+                            ((ComputationGraph) replicatedModel).setLastEtlTime(lastEtlTime.get());
                             ((ComputationGraph) replicatedModel).fit(dataSet);
                         } else
                             throw new RuntimeException("MultiDataSet can be fit into ComputationGraph only");
@@ -250,8 +315,8 @@ public class DefaultTrainer extends Thread implements Trainer {
 
 
 
-    protected static IterationListener cloneListener(IterationListener original){
-        if(original instanceof RoutingIterationListener){
+    protected static IterationListener cloneListener(IterationListener original) {
+        if (original instanceof RoutingIterationListener) {
             return ((RoutingIterationListener) original).clone();
         }
         return original;
@@ -259,19 +324,19 @@ public class DefaultTrainer extends Thread implements Trainer {
 
 
     protected void configureListeners(String workerUUID, Collection<IterationListener> oldListeners,
-                                    Collection<IterationListener> replicatedListeners){
+                    Collection<IterationListener> replicatedListeners) {
         for (IterationListener listener : oldListeners) {
             IterationListener l = cloneListener(listener);
 
             if (l instanceof RoutingIterationListener) {
-                RoutingIterationListener rl = (RoutingIterationListener)l;
+                RoutingIterationListener rl = (RoutingIterationListener) l;
                 //We're assuming session ID is set by the original RoutingIterationListener constructor, which means
                 // it will be synced across all cloned instances
                 rl.setSessionID(((RoutingIterationListener) listener).getSessionID());
                 rl.setWorkerID(workerUUID);
 
-                StatsStorageRouter currentRouter = ((RoutingIterationListener)listener).getStorageRouter();
-                if(currentRouter != null){
+                StatsStorageRouter currentRouter = ((RoutingIterationListener) listener).getStorageRouter();
+                if (currentRouter != null) {
                     //User has set router on the listener/model, instead of via the
                     // setListeners(StatsStorageRouter, ...) method
                     rl.setStorageRouter(currentRouter);
@@ -286,8 +351,7 @@ public class DefaultTrainer extends Thread implements Trainer {
 
 
     public static class DefaultTrainerBuilder {
-        public DefaultTrainerBuilder() {
-        }
+        public DefaultTrainerBuilder() {}
     }
 
 }

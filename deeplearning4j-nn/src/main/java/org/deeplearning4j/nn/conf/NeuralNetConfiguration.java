@@ -19,12 +19,10 @@
 package org.deeplearning4j.nn.conf;
 
 import com.google.common.collect.Sets;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.*;
 import org.apache.commons.lang3.ClassUtils;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
 import org.deeplearning4j.nn.conf.distribution.Distribution;
-import org.deeplearning4j.nn.conf.distribution.NormalDistribution;
 import org.deeplearning4j.nn.conf.graph.GraphVertex;
 import org.deeplearning4j.nn.conf.layers.ConvolutionLayer;
 import org.deeplearning4j.nn.conf.layers.Layer;
@@ -118,7 +116,6 @@ public class NeuralNetConfiguration implements Serializable, Cloneable {
     // This is important for learning rate schedules, for example, and is stored here to ensure it is persisted
     // for Spark and model serialization
     protected int iterationCount = 0;
-
 
     private static ObjectMapper mapper = initMapper();
     private static final ObjectMapper mapperYaml = initMapperYaml();
@@ -271,7 +268,7 @@ public class NeuralNetConfiguration implements Serializable, Cloneable {
             return new MultiLayerConfiguration.Builder().backprop(backprop).inputPreProcessors(inputPreProcessors)
                             .pretrain(pretrain).backpropType(backpropType).tBPTTForwardLength(tbpttFwdLength)
                             .tBPTTBackwardLength(tbpttBackLength).cnnInputSize(this.cnnInputSize)
-                            .setInputType(this.inputType).confs(list).build();
+                            .setInputType(this.inputType).trainingWorkspaceMode(globalConfig.trainingWorkspaceMode).confs(list).build();
         }
 
     }
@@ -534,6 +531,9 @@ public class NeuralNetConfiguration implements Serializable, Cloneable {
         protected double lrPolicyPower = Double.NaN;
         protected boolean pretrain = false;
 
+        protected WorkspaceMode trainingWorkspaceMode = WorkspaceMode.NONE;
+        protected WorkspaceMode inferenceWorkspaceMode = WorkspaceMode.SINGLE;
+
         protected ConvolutionMode convolutionMode = ConvolutionMode.Truncate;
 
         public Builder() {
@@ -564,6 +564,34 @@ public class NeuralNetConfiguration implements Serializable, Cloneable {
          * Default set to true. */
         public Builder miniBatch(boolean miniBatch) {
             this.miniBatch = miniBatch;
+            return this;
+        }
+
+        /**
+         * This method defines Workspace mode being used during training:
+         * NONE: workspace won't be used
+         * SINGLE: one workspace will be used during whole iteration loop
+         * SEPARATE: separate workspaces will be used for feedforward and backprop iteration loops
+         *
+         * @param workspaceMode
+         * @return
+         */
+        public Builder trainingWorkspaceMode(@NonNull WorkspaceMode workspaceMode) {
+            this.trainingWorkspaceMode = workspaceMode;
+            return this;
+        }
+
+        /**
+         * This method defines Workspace mode being used during inference:
+         * NONE: workspace won't be used
+         * SINGLE: one workspace will be used during whole iteration loop
+         * SEPARATE: separate workspaces will be used for feedforward and backprop iteration loops
+         *
+         * @param workspaceMode
+         * @return
+         */
+        public Builder inferenceWorkspaceMode(@NonNull WorkspaceMode workspaceMode) {
+            this.inferenceWorkspaceMode = workspaceMode;
             return this;
         }
 
@@ -1042,8 +1070,17 @@ public class NeuralNetConfiguration implements Serializable, Cloneable {
             if (layer != null) {
                 if (Double.isNaN(layer.getLearningRate()))
                     layer.setLearningRate(learningRate);
-                if (Double.isNaN(layer.getBiasLearningRate()))
-                    layer.setBiasLearningRate(layer.getLearningRate());
+                if (Double.isNaN(layer.getBiasLearningRate())) {
+                    //Two possibilities when bias LR isn't set for layer:
+                    // (a) If global bias LR *is* set -> set it to that
+                    // (b) Otherwise, set to layer LR (and, by extension, the global LR)
+                    if (!Double.isNaN(biasLearningRate)) {
+                        //Global bias LR is set
+                        layer.setBiasLearningRate(biasLearningRate);
+                    } else {
+                        layer.setBiasLearningRate(layer.getLearningRate());
+                    }
+                }
                 if (layer.getLearningRateSchedule() == null)
                     layer.setLearningRateSchedule(learningRateSchedule);
                 if (Double.isNaN(layer.getL1()))

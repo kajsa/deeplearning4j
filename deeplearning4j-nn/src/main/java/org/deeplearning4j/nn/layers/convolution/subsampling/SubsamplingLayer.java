@@ -75,10 +75,10 @@ public class SubsamplingLayer extends BaseLayer<org.deeplearning4j.nn.conf.layer
         try {
             helper = Class.forName("org.deeplearning4j.nn.layers.convolution.subsampling.CudnnSubsamplingHelper")
                             .asSubclass(SubsamplingHelper.class).newInstance();
-            log.debug("CudnnSubsamplingHelper successfully loaded");
+            log.debug("CudnnSubsamplingHelper successfully initialized");
         } catch (Throwable t) {
             if (!(t instanceof ClassNotFoundException)) {
-                log.warn("Could not load CudnnSubsamplingHelper", t);
+                log.warn("Could not initialize CudnnSubsamplingHelper", t);
             }
         }
     }
@@ -285,7 +285,7 @@ public class SubsamplingLayer extends BaseLayer<org.deeplearning4j.nn.conf.layer
 
         //Similar to convolution layer forward pass: do im2col, but permute so that pooling can be done with efficient strides...
         //Current im2col implementation expects input with shape [miniBatch,depth,kH,kW,outH,outW]
-        INDArray col = Nd4j.create(new int[] {miniBatch, inDepth, outH, outW, kernel[0], kernel[1]}, 'c');
+        INDArray col = Nd4j.createUninitialized(new int[] {miniBatch, inDepth, outH, outW, kernel[0], kernel[1]}, 'c');
         INDArray col2 = col.permute(0, 1, 4, 5, 2, 3);
         Convolution.im2col(input, kernel[0], kernel[1], strides[0], strides[1], pad[0], pad[1],
                         convolutionMode == ConvolutionMode.Same, col2);

@@ -59,6 +59,14 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
     protected Map<String, GraphVertex> vertices = new LinkedHashMap<>();
     protected Map<String, List<String>> vertexInputs = new LinkedHashMap<>();
 
+    @Getter
+    @Setter
+    protected WorkspaceMode trainingWorkspaceMode;
+
+    @Getter
+    @Setter
+    protected WorkspaceMode inferenceWorkspaceMode;
+
     /**
      * List of inputs to the network, by name
      */
@@ -88,10 +96,12 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
      */
     public String toYaml() {
         ObjectMapper mapper = NeuralNetConfiguration.mapperYaml();
-        try {
-            return mapper.writeValueAsString(this);
-        } catch (org.nd4j.shade.jackson.core.JsonProcessingException e) {
-            throw new RuntimeException(e);
+        synchronized (mapper) {
+            try {
+                return mapper.writeValueAsString(this);
+            } catch (org.nd4j.shade.jackson.core.JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
@@ -116,10 +126,14 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
     public String toJson() {
         //As per MultiLayerConfiguration.toJson()
         ObjectMapper mapper = NeuralNetConfiguration.mapper();
-        try {
-            return mapper.writeValueAsString(this);
-        } catch (org.nd4j.shade.jackson.core.JsonProcessingException e) {
-            throw new RuntimeException(e);
+        synchronized (mapper) {
+            //JSON mappers are supposed to be thread safe: however, in practice they seem to miss fields occasionally
+            //when writeValueAsString is used by multiple threads. This results in invalid JSON. See issue #3243
+            try {
+                return mapper.writeValueAsString(this);
+            } catch (org.nd4j.shade.jackson.core.JsonProcessingException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
@@ -223,6 +237,8 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
         conf.tbpttFwdLength = tbpttFwdLength;
         conf.tbpttBackLength = tbpttBackLength;
         conf.defaultConfiguration = defaultConfiguration.clone();
+        conf.trainingWorkspaceMode = trainingWorkspaceMode;
+        conf.inferenceWorkspaceMode = inferenceWorkspaceMode;
 
         return conf;
     }
@@ -365,6 +381,7 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
                 vertexOutputs.put(s, inputTypes[inputIdx]);
                 continue;
             }
+
             GraphVertex gv = vertices.get(s);
 
             List<InputType> inputTypeList = new ArrayList<>();
@@ -433,7 +450,6 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
         protected Map<String, InputPreProcessor> inputPreProcessors = new LinkedHashMap<>();
 
         protected NeuralNetConfiguration.Builder globalConfiguration;
-
 
         public GraphBuilder(NeuralNetConfiguration.Builder globalConfiguration) {
             this.globalConfiguration = globalConfiguration;
@@ -689,6 +705,8 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
 
             conf.vertices = this.vertices;
             conf.vertexInputs = this.vertexInputs;
+            conf.trainingWorkspaceMode = globalConfiguration.trainingWorkspaceMode;
+            conf.inferenceWorkspaceMode = globalConfiguration.inferenceWorkspaceMode;
 
             conf.defaultConfiguration = globalConfiguration.build();
             conf.getDefaultConfiguration().setPretrain(pretrain);

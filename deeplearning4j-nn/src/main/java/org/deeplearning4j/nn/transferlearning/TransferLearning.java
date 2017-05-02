@@ -17,6 +17,7 @@ import org.deeplearning4j.nn.graph.vertex.VertexIndices;
 import org.deeplearning4j.nn.layers.FrozenLayer;
 import org.deeplearning4j.nn.multilayer.MultiLayerNetwork;
 import org.deeplearning4j.nn.weights.WeightInit;
+import org.deeplearning4j.nn.conf.WorkspaceMode;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.factory.Nd4j;
 
@@ -432,6 +433,7 @@ public class TransferLearning {
         private String[] frozenOutputAt;
         private boolean hasFrozen = false;
         private Set<String> editedVertices = new HashSet<>();
+        private WorkspaceMode workspaceMode;
 
         /**
          * Computation Graph to tweak for transfer learning
@@ -688,8 +690,34 @@ public class TransferLearning {
             }
         }
 
-        protected GraphBuilder addInputs(String... inputNames) {
+        /**
+         * Sets new inputs for the computation graph. This method will remove any
+         * pre-existing inputs.
+         * @param inputs String names of each graph input.
+         * @return {@code GraphBuilder} instance.
+         */
+        public GraphBuilder setInputs(String... inputs) {
+            editedConfigBuilder.setNetworkInputs(Arrays.asList(inputs));
+            return this;
+        }
+
+        /**
+         * Sets the input type of corresponding inputs.
+         * @param inputTypes The type of input (such as convolutional).
+         * @return {@code GraphBuilder} instance.
+         */
+        public GraphBuilder setInputTypes(InputType... inputTypes) {
+            editedConfigBuilder.setInputTypes(inputTypes);
+            return this;
+        }
+
+        public GraphBuilder addInputs(String... inputNames) {
             editedConfigBuilder.addInputs(inputNames);
+            return this;
+        }
+
+        public GraphBuilder setWorkspaceMode(WorkspaceMode workspaceMode) {
+            this.workspaceMode = workspaceMode;
             return this;
         }
 
@@ -702,6 +730,7 @@ public class TransferLearning {
             initBuilderIfReq();
 
             ComputationGraphConfiguration newConfig = editedConfigBuilder.build();
+            if(this.workspaceMode != null) newConfig.setTrainingWorkspaceMode(workspaceMode);
             ComputationGraph newGraph = new ComputationGraph(newConfig);
             newGraph.init();
 
