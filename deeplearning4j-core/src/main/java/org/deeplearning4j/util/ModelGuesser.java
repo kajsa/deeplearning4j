@@ -7,11 +7,9 @@ import org.deeplearning4j.nn.api.Model;
 import org.deeplearning4j.nn.conf.ComputationGraphConfiguration;
 import org.deeplearning4j.nn.conf.MultiLayerConfiguration;
 import org.deeplearning4j.nn.modelimport.keras.KerasModelImport;
+import org.nd4j.linalg.dataset.api.preprocessor.Normalizer;
 
-import java.io.BufferedOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
+import java.io.*;
 import java.util.UUID;
 
 /**
@@ -20,6 +18,26 @@ import java.util.UUID;
  */
 @Slf4j
 public class ModelGuesser {
+
+
+    /**
+     * A facade for {@link ModelSerializer#restoreNormalizerFromInputStream(InputStream)}
+     * @param is the input stream to load form
+     * @return the loaded normalizer
+     * @throws IOException
+     */
+    public static Normalizer<?> loadNormalizer(InputStream is) throws IOException {
+        return ModelSerializer.restoreNormalizerFromInputStream(is);
+    }
+
+    /**
+     * A facade for {@link ModelSerializer#restoreNormalizerFromFile(File)}
+     * @param path the path to the file
+     * @return the loaded normalizer
+     */
+    public static Normalizer<?> loadNormalizer(String path) {
+        return ModelSerializer.restoreNormalizerFromFile(new File(path));
+    }
 
 
 
@@ -103,16 +121,28 @@ public class ModelGuesser {
             } catch (Exception e1) {
                 log.warn("Tried computation graph");
                 try {
-                    return KerasModelImport.importKerasModelAndWeights(path);
-                } catch (Exception e2) {
-                    log.warn("Tried multi layer network keras");
+                    return ModelSerializer.restoreMultiLayerNetwork(new File(path), false);
+                }catch(Exception e4) {
                     try {
-                        return KerasModelImport.importKerasSequentialModelAndWeights(path);
+                        return ModelSerializer.restoreComputationGraph(new File(path), false);
+                    }catch(Exception e5) {
+                        try {
+                            return KerasModelImport.importKerasModelAndWeights(path);
+                        } catch (Exception e2) {
+                            log.warn("Tried multi layer network keras");
+                            try {
+                                return KerasModelImport.importKerasSequentialModelAndWeights(path);
 
-                    } catch (Exception e3) {
-                        throw e3;
+                            } catch (Exception e3) {
+                                throw e3;
+                            }
+                        }
                     }
+
                 }
+
+
+
             }
         }
     }
@@ -133,15 +163,28 @@ public class ModelGuesser {
                 return ModelSerializer.restoreComputationGraph(stream, true);
             } catch (Exception e1) {
                 try {
-                    return KerasModelImport.importKerasModelAndWeights(stream);
-                } catch (Exception e2) {
-                    try {
-                        return KerasModelImport.importKerasSequentialModelAndWeights(stream);
+                    return ModelSerializer.restoreMultiLayerNetwork(stream, false);
 
-                    } catch (Exception e3) {
-                        throw e3;
+                }catch(Exception e5) {
+                    try {
+                        return ModelSerializer.restoreComputationGraph(stream, false);
+
+                    }catch(Exception e6) {
+                        try {
+                            return KerasModelImport.importKerasModelAndWeights(stream);
+                        } catch (Exception e2) {
+                            try {
+                                return KerasModelImport.importKerasSequentialModelAndWeights(stream);
+
+                            } catch (Exception e3) {
+                                throw e3;
+                            }
+                        }
                     }
+
                 }
+
+
             }
         }
     }

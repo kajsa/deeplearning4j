@@ -17,6 +17,7 @@ import org.deeplearning4j.nn.multilayer.MultiLayerNetwork;
 import org.deeplearning4j.nn.updater.graph.ComputationGraphUpdater;
 import org.deeplearning4j.optimize.api.IterationListener;
 import org.deeplearning4j.parallelism.ParallelWrapper;
+import org.nd4j.linalg.api.concurrency.AffinityManager;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.api.ops.executioner.GridExecutioner;
 import org.nd4j.linalg.dataset.api.DataSet;
@@ -63,6 +64,8 @@ public class DefaultTrainer extends Thread implements Trainer {
 
     protected AtomicBoolean nullMode = new AtomicBoolean(false);
     protected DataSet nullDataSet;
+
+    protected AtomicBoolean isStopped = new AtomicBoolean(false);
 
 
 
@@ -115,8 +118,7 @@ public class DefaultTrainer extends Thread implements Trainer {
                 updater = ((MultiLayerNetwork) replicatedModel).getUpdater();
                 INDArray viewD = view.dup();
 
-                if (Nd4j.getExecutioner() instanceof GridExecutioner)
-                    ((GridExecutioner) Nd4j.getExecutioner()).flushQueueBlocking();
+                Nd4j.getExecutioner().commit();
 
                 updater.setStateViewArray((MultiLayerNetwork) replicatedModel, viewD, false);
             }
@@ -129,16 +131,14 @@ public class DefaultTrainer extends Thread implements Trainer {
             if (view != null) {
                 INDArray viewD = view.dup();
 
-                if (Nd4j.getExecutioner() instanceof GridExecutioner)
-                    ((GridExecutioner) Nd4j.getExecutioner()).flushQueueBlocking();
+                Nd4j.getExecutioner().commit();
 
                 updater = ((ComputationGraph) replicatedModel).getUpdater();
                 updater.setStateViewArray(viewD);
             }
         }
 
-        if (Nd4j.getExecutioner() instanceof GridExecutioner)
-            ((GridExecutioner) Nd4j.getExecutioner()).flushQueueBlocking();
+        Nd4j.getExecutioner().commit();
     }
 
 
@@ -154,6 +154,8 @@ public class DefaultTrainer extends Thread implements Trainer {
             shouldStop = new AtomicBoolean(false);
         if (shouldUpdate == null)
             shouldUpdate = new AtomicBoolean(false);
+        if (isStopped == null)
+            isStopped = new AtomicBoolean(false);
     }
 
     @Override
@@ -168,6 +170,11 @@ public class DefaultTrainer extends Thread implements Trainer {
     @Override
     public void shutdown() {
         shouldStop.set(true);
+        while (!isStopped.get())
+            LockSupport.parkNanos(1000L);
+
+        shouldStop.set(false);
+        isStopped.set(false);
     }
 
     @Override
@@ -197,8 +204,7 @@ public class DefaultTrainer extends Thread implements Trainer {
                             updaterReplica.setStateViewArray((MultiLayerNetwork) replicatedModel,
                                             updaterOrigina.getStateViewArray().dup(), false);
 
-                        if (Nd4j.getExecutioner() instanceof GridExecutioner)
-                            ((GridExecutioner) Nd4j.getExecutioner()).flushQueueBlocking();
+                        Nd4j.getExecutioner().commit();
                     }
 
                     Collection<IterationListener> oldListeners = ((MultiLayerNetwork) originalModel).getListeners();
@@ -232,8 +238,7 @@ public class DefaultTrainer extends Thread implements Trainer {
                         if (updaterOrigina != null && updaterOrigina.getStateViewArray() != null)
                             updaterReplica.setStateViewArray(updaterOrigina.getStateViewArray().dup());
 
-                        if (Nd4j.getExecutioner() instanceof GridExecutioner)
-                            ((GridExecutioner) Nd4j.getExecutioner()).flushQueueBlocking();
+                        Nd4j.getExecutioner().commit();
                     }
 
                     Collection<IterationListener> oldListeners = ((ComputationGraph) originalModel).getListeners();
@@ -273,8 +278,25 @@ public class DefaultTrainer extends Thread implements Trainer {
                             ((ComputationGraph) replicatedModel).fit(dataSet);
                         }
 
-                        if (Nd4j.getExecutioner() instanceof GridExecutioner)
-                            ((GridExecutioner) Nd4j.getExecutioner()).flushQueueBlocking();
+                        // we ensure all operations are finished in this training round
+                        Nd4j.getExecutioner().commit();
+
+                        // if we don't support cross-device stuff (like multi-gpu on windows) - sync back to host
+                        if (!Nd4j.getAffinityManager().isCrossDeviceAccessSupported()) {
+                            // we ensure memory is updated on host side
+                            Nd4j.getAffinityManager().ensureLocation(replicatedModel.params(), AffinityManager.Location.HOST);
+
+                            if (replicatedModel instanceof MultiLayerNetwork) {
+                                Updater updaterReplica = ((MultiLayerNetwork) replicatedModel).getUpdater();
+                                if (updaterReplica.getStateViewArray() != null)
+                                    Nd4j.getAffinityManager().ensureLocation(updaterReplica.getStateViewArray(), AffinityManager.Location.HOST);
+                            } else {
+                                ComputationGraphUpdater updaterReplica = ((ComputationGraph) replicatedModel).getUpdater();
+
+                                if (updaterReplica.getStateViewArray() != null)
+                                    Nd4j.getAffinityManager().ensureLocation(updaterReplica.getStateViewArray(), AffinityManager.Location.HOST);
+                            }
+                        }
 
                         running.decrementAndGet();
                     }
@@ -290,8 +312,21 @@ public class DefaultTrainer extends Thread implements Trainer {
                         } else
                             throw new RuntimeException("MultiDataSet can be fit into ComputationGraph only");
 
-                        if (Nd4j.getExecutioner() instanceof GridExecutioner)
-                            ((GridExecutioner) Nd4j.getExecutioner()).flushQueueBlocking();
+                        // we ensure all operations are finished in this training round
+                        Nd4j.getExecutioner().commit();
+
+
+                        // if we don't support cross-device stuff (like multi-gpu on windows) - sync back to host
+                        if (!Nd4j.getAffinityManager().isCrossDeviceAccessSupported()) {
+
+                            // we ensure memory is updated on host side
+                            Nd4j.getAffinityManager().ensureLocation(replicatedModel.params(), AffinityManager.Location.HOST);
+
+                            ComputationGraphUpdater updaterReplica = ((ComputationGraph) replicatedModel).getUpdater();
+
+                            if (updaterReplica.getStateViewArray() != null)
+                                Nd4j.getAffinityManager().ensureLocation(updaterReplica.getStateViewArray(), AffinityManager.Location.HOST);
+                        }
 
                         running.decrementAndGet();
                     }
@@ -299,6 +334,10 @@ public class DefaultTrainer extends Thread implements Trainer {
             }
         } catch (Exception e) {
             this.thrownException = e;
+        } finally {
+            log.debug("Terminating all workspaces for trainer_{}", threadId);
+            Nd4j.getWorkspaceManager().destroyAllWorkspacesForCurrentThread();
+            isStopped.set(true);
         }
     }
 
@@ -309,7 +348,7 @@ public class DefaultTrainer extends Thread implements Trainer {
             if (thrownException != null)
                 throw new RuntimeException(thrownException);
 
-            LockSupport.parkNanos(50000L);
+            LockSupport.parkNanos(1000L);
         }
     }
 

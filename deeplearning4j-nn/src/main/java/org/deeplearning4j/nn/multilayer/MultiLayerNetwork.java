@@ -687,15 +687,18 @@ public class MultiLayerNetwork implements Serializable, Classifier, Layer {
      * @return the list of activations for each layer
      */
     public List<INDArray> computeZ(boolean training) {
-        INDArray currInput = this.input;
+        INDArray currentInput = this.input;
+        INDArray currentZ;
 
         List<INDArray> activations = new ArrayList<>();
-        activations.add(currInput);
+        activations.add(currentInput);
 
         for (int i = 0; i < layers.length; i++) {
-                currInput = zFromPrevLayer(i, currInput, training);
-                //applies drop connect to the activation
-                activations.add(currInput);
+            //It's inefficient, but we do need to do forward pass twice, as some layers (like LSTMs)
+            // don't decompose into out = activationFn(preOut)
+            currentZ = zFromPrevLayer(i, currentInput, training);
+            currentInput = activationFromPrevLayer(i, currentInput, training);
+            activations.add(currentZ);
         }
         return activations;
     }
@@ -930,11 +933,14 @@ public class MultiLayerNetwork implements Serializable, Classifier, Layer {
      */
     @Override
     public void setParams(INDArray params) {
-        if (flattenedParams == params)
+        if (flattenedParams == params) {
             return; //No op
+        }
 
         if (flattenedParams != null && params.length() == flattenedParams.length()) {
-            flattenedParams.assign(params);
+            if (params != flattenedParams) {
+                flattenedParams.assign(params);
+            }
         } else {
             if (flattenedParams == null)
                 flattenedParams = params.dup();
@@ -1676,18 +1682,15 @@ public class MultiLayerNetwork implements Serializable, Classifier, Layer {
      * [0.5, 0.5] or some other probability distribution summing to one
      */
     public INDArray output(INDArray input, boolean train) {
+        WorkspaceMode cMode = layerWiseConfigurations.getTrainingWorkspaceMode();
+        layerWiseConfigurations.setTrainingWorkspaceMode(layerWiseConfigurations.getInferenceWorkspaceMode());
         MemoryWorkspace workspace = layerWiseConfigurations.getTrainingWorkspaceMode() == WorkspaceMode.NONE ? dummy : Nd4j.getWorkspaceManager().getWorkspaceForCurrentThread(workspaceConfigurationExternal, workspaceExternal);
 
         try(MemoryWorkspace wsE = workspace.notifyScopeEntered()) {
-            return silentOutput(input, train).detach();
-        }
-    }
+            INDArray ret = silentOutput(input, train).detach();
 
-    public INDArray outputStrict(INDArray input, boolean train) {
-        MemoryWorkspace workspace = layerWiseConfigurations.getTrainingWorkspaceMode() == WorkspaceMode.NONE ? dummy : Nd4j.getWorkspaceManager().getWorkspaceForCurrentThread(workspaceConfigurationExternal, workspaceExternal);
-
-        try(MemoryWorkspace wsE = workspace.notifyScopeEntered()) {
-            return silentOutput(input, train).detach();
+            layerWiseConfigurations.setTrainingWorkspaceMode(cMode);
+            return ret;
         }
     }
 
@@ -1703,22 +1706,24 @@ public class MultiLayerNetwork implements Serializable, Classifier, Layer {
      * of varying lengths within the same minibatch.
      */
     public INDArray output(INDArray input, boolean train, INDArray featuresMask, INDArray labelsMask) {
+        WorkspaceMode cMode = layerWiseConfigurations.getTrainingWorkspaceMode();
+        layerWiseConfigurations.setTrainingWorkspaceMode(layerWiseConfigurations.getInferenceWorkspaceMode());
         MemoryWorkspace workspace = layerWiseConfigurations.getTrainingWorkspaceMode() == WorkspaceMode.NONE ? dummy : Nd4j.getWorkspaceManager().getWorkspaceForCurrentThread(workspaceConfigurationExternal, workspaceExternal);
 
         try(MemoryWorkspace wsE = workspace.notifyScopeEntered()) {
-            return silentOutput(input, train, featuresMask, labelsMask).detach();
+            INDArray ret = silentOutput(input, train, featuresMask, labelsMask).detach();
+
+            layerWiseConfigurations.setTrainingWorkspaceMode(cMode);
+            return ret;
         }
     }
 
     protected INDArray silentOutput(INDArray input, boolean train, INDArray featuresMask, INDArray labelsMask) {
-        WorkspaceMode cMode = layerWiseConfigurations.getTrainingWorkspaceMode();
-        layerWiseConfigurations.setTrainingWorkspaceMode(layerWiseConfigurations.getInferenceWorkspaceMode());
+
 
         setLayerMaskArrays(featuresMask, labelsMask);
         INDArray out = silentOutput(input, train);
         clearLayerMaskArrays();
-
-        layerWiseConfigurations.setTrainingWorkspaceMode(cMode);
         return out;
     }
 
@@ -2608,15 +2613,7 @@ public class MultiLayerNetwork implements Serializable, Classifier, Layer {
      * @return
      */
     public RegressionEvaluation evaluateRegression(DataSetIterator iterator) {
-
-        DataSetIterator adsi = iterator.asyncSupported() ? new AsyncDataSetIterator(iterator, 8, true) : iterator;
-
-        RegressionEvaluation evaluation = doEvaluation(adsi, new RegressionEvaluation(iterator.totalOutcomes()));
-
-        if (iterator.asyncSupported())
-            ((AsyncDataSetIterator) adsi).shutdown();
-
-        return evaluation;
+        return doEvaluation(iterator, new RegressionEvaluation(iterator.totalOutcomes()))[0];
     }
 
     /**
@@ -2627,14 +2624,7 @@ public class MultiLayerNetwork implements Serializable, Classifier, Layer {
      * @return ROC evaluation on the given dataset
      */
     public ROC evaluateROC(DataSetIterator iterator, int rocThresholdSteps) {
-        DataSetIterator adsi = iterator.asyncSupported() ? new AsyncDataSetIterator(iterator, 8, true) : iterator;
-
-        ROC evaluation = doEvaluation(adsi, new ROC(rocThresholdSteps));
-
-        if (iterator.asyncSupported())
-            ((AsyncDataSetIterator) adsi).shutdown();
-
-        return evaluation;
+        return doEvaluation(iterator, new ROC(rocThresholdSteps))[0];
     }
 
     /**
@@ -2645,14 +2635,7 @@ public class MultiLayerNetwork implements Serializable, Classifier, Layer {
      * @return Multi-class ROC evaluation on the given dataset
      */
     public ROCMultiClass evaluateROCMultiClass(DataSetIterator iterator, int rocThresholdSteps) {
-        DataSetIterator adsi = iterator.asyncSupported() ? new AsyncDataSetIterator(iterator, 8, true) : iterator;
-
-        ROCMultiClass evaluation = doEvaluation(adsi, new ROCMultiClass(rocThresholdSteps));
-
-        if (iterator.asyncSupported())
-            ((AsyncDataSetIterator) adsi).shutdown();
-
-        return evaluation;
+        return doEvaluation(iterator, new ROCMultiClass(rocThresholdSteps))[0];
     }
 
     /**
@@ -2661,15 +2644,17 @@ public class MultiLayerNetwork implements Serializable, Classifier, Layer {
      * @param iterator   data to evaluate on
      * @param evaluation IEvaluation instance to perform evaluation with
      */
-    public <T extends IEvaluation> T doEvaluation(DataSetIterator iterator, T evaluation) {
+    public <T extends IEvaluation> T[] doEvaluation(DataSetIterator iterator, T... evaluations) {
         if (!iterator.hasNext() && iterator.resetSupported()) {
             iterator.reset();
         }
 
+        DataSetIterator iter = iterator.asyncSupported() ? new AsyncDataSetIterator(iterator, 2, true) : iterator;
+
         MemoryWorkspace workspace = layerWiseConfigurations.getTrainingWorkspaceMode() == WorkspaceMode.NONE ? dummy : Nd4j.getWorkspaceManager().getWorkspaceForCurrentThread(workspaceConfigurationExternal,workspaceExternal);
 
-        while (iterator.hasNext()) {
-            DataSet next = iterator.next();
+        while (iter.hasNext()) {
+            DataSet next = iter.next();
 
             if (next.getFeatureMatrix() == null || next.getLabels() == null)
                 break;
@@ -2688,13 +2673,17 @@ public class MultiLayerNetwork implements Serializable, Classifier, Layer {
                     out = this.silentOutput(features, false);
                 }
 
+                for(T evaluation: evaluations)
                 evaluation.eval(labels, out, lMask);
             }
 
             clearLayerMaskArrays();
         }
 
-        return evaluation;
+        if (iterator.asyncSupported())
+            ((AsyncDataSetIterator) iter).shutdown();
+
+        return evaluations;
     }
 
     /**
@@ -2723,13 +2712,8 @@ public class MultiLayerNetwork implements Serializable, Classifier, Layer {
         if (labelsList == null)
             labelsList = iterator.getLabels();
 
-        DataSetIterator adsi = iterator.asyncSupported() ? new AsyncDataSetIterator(iterator, 8, true) : iterator;
-
         Evaluation e = new Evaluation(labelsList, topN);
-        doEvaluation(adsi, e);
-
-        if (iterator.asyncSupported())
-            ((AsyncDataSetIterator) adsi).shutdown();
+        doEvaluation(iterator, e);
 
         return e;
     }
@@ -2808,4 +2792,63 @@ public class MultiLayerNetwork implements Serializable, Classifier, Layer {
         }
     }
 
+    /**
+     * Indicates whether some other object is "equal to" this one.
+     * <p>
+     * The {@code equals} method implements an equivalence relation
+     * on non-null object references:
+     * <ul>
+     * <li>It is <i>reflexive</i>: for any non-null reference value
+     * {@code x}, {@code x.equals(x)} should return
+     * {@code true}.
+     * <li>It is <i>symmetric</i>: for any non-null reference values
+     * {@code x} and {@code y}, {@code x.equals(y)}
+     * should return {@code true} if and only if
+     * {@code y.equals(x)} returns {@code true}.
+     * <li>It is <i>transitive</i>: for any non-null reference values
+     * {@code x}, {@code y}, and {@code z}, if
+     * {@code x.equals(y)} returns {@code true} and
+     * {@code y.equals(z)} returns {@code true}, then
+     * {@code x.equals(z)} should return {@code true}.
+     * <li>It is <i>consistent</i>: for any non-null reference values
+     * {@code x} and {@code y}, multiple invocations of
+     * {@code x.equals(y)} consistently return {@code true}
+     * or consistently return {@code false}, provided no
+     * information used in {@code equals} comparisons on the
+     * objects is modified.
+     * <li>For any non-null reference value {@code x},
+     * {@code x.equals(null)} should return {@code false}.
+     * </ul>
+     * <p>
+     * The {@code equals} method for class {@code Object} implements
+     * the most discriminating possible equivalence relation on objects;
+     * that is, for any non-null reference values {@code x} and
+     * {@code y}, this method returns {@code true} if and only
+     * if {@code x} and {@code y} refer to the same object
+     * ({@code x == y} has the value {@code true}).
+     * <p>
+     * Note that it is generally necessary to override the {@code hashCode}
+     * method whenever this method is overridden, so as to maintain the
+     * general contract for the {@code hashCode} method, which states
+     * that equal objects must have equal hash codes.
+     *
+     * @param obj the reference object with which to compare.
+     * @return {@code true} if this object is the same as the obj
+     * argument; {@code false} otherwise.
+     * @see #hashCode()
+     * @see HashMap
+     */
+    @Override
+    public boolean equals(Object obj) {
+        if(obj == null)
+            return false;
+        if(obj instanceof MultiLayerNetwork) {
+            MultiLayerNetwork network = (MultiLayerNetwork) obj;
+            boolean paramsEquals = network.params().equals(params());
+            boolean confEquals = getLayerWiseConfigurations().equals(network.getLayerWiseConfigurations());
+            boolean updaterEquals = getUpdater().equals(network.getUpdater());
+            return paramsEquals && confEquals && updaterEquals;
+        }
+        return false;
+    }
 }
